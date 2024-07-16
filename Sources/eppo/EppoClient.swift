@@ -50,14 +50,30 @@ public class EppoClient {
     private var debugInitStartTime: Date?
     private var debugLastStepTime: Date?
 
-    private init(
+    private let queue = DispatchQueue(label: "com.eppo.client.EppoClient", attributes: .concurrent)
+
+    private var _hasLoaded = false
+    private var hasLoaded: Bool {
+        get {
+            queue.sync {
+                self._hasLoaded
+            }
+        }
+        set {
+            queue.async(flags: .barrier) {
+                self._hasLoaded = newValue
+            }
+        }
+    }
+
+    public init(
         sdkKey: String,
-        host: String? = nil,
+        host: String = "https://fscdn.eppo.cloud",
         assignmentLogger: AssignmentLogger? = nil,
         assignmentCache: AssignmentCache? = InMemoryAssignmentCache(),
         initialConfiguration: Configuration?,
         withPersistentCache: Bool = true,
-        debugCallback: ((String, Double, Double) -> Void)? = nil
+        debugCallback: ((String, Double, Double) -> Void)? = nil,
     ) {
         self.sdkKey = SDKKey(sdkKey)
         self.assignmentLogger = assignmentLogger
@@ -94,7 +110,7 @@ public class EppoClient {
     /// Configuration can later be loaded with `load()` method.
     public static func initializeOffline(
         sdkKey: String,
-        host: String? = nil,
+        host: String,
         assignmentLogger: AssignmentLogger? = nil,
         assignmentCache: AssignmentCache? = InMemoryAssignmentCache(),
         initialConfiguration: Configuration?,
@@ -128,7 +144,7 @@ public class EppoClient {
 
     public static func initialize(
         sdkKey: String,
-        host: String? = nil,
+        host: String,
         assignmentLogger: AssignmentLogger? = nil,
         assignmentCache: AssignmentCache? = InMemoryAssignmentCache(),
         initialConfiguration: Configuration? = nil,
@@ -235,102 +251,128 @@ public class EppoClient {
         try await self.load()
     }
 
+    // Note: this *must* be called before getting any assignments, otherwise an error will
+    // be thrown
+    public func load(force: Bool = false) async throws {
+        guard !hasLoaded || force else {
+            return
+        }
+
+        // Prevent multiple subsequent calls, optimistically assuming the fetch will succeed
+        hasLoaded = true
+
+        do {
+            debugLog("Starting configuration fetch from remote")
+
+            let config = try await self.configurationRequester.fetchConfigurations()
+
+            debugLog("Network fetch and parsing completed")
+
+            debugLog("Starting configuration storage")
+
+            self.configurationStore.setConfiguration(configuration: config)
+            notifyConfigurationChange(config)
+
+            debugLog("Configuration storage and load completed")
+        } catch {
+            hasLoaded = false
+            throw error
+        }
+    }
+
+    public func getAssignment(
+        flagKey: String,
+        subjectKey: String,
+        subjectAttributes: SubjectAttributes = SubjectAttributes()) throws -> String?
+    {
+        return try getInternalAssignment(
+            flagKey: flagKey,
+            subjectKey: subjectKey,
+            subjectAttributes: subjectAttributes
+        )?.variation?.value.getStringValue()
+    }
+
     public func getBooleanAssignment(
         flagKey: String,
         subjectKey: String,
         subjectAttributes: SubjectAttributes = SubjectAttributes(),
-        defaultValue: Bool) -> Bool {
-        do {
-            return try getInternalAssignment(
-                flagKey: flagKey,
-                subjectKey: subjectKey,
-                subjectAttributes: subjectAttributes,
-                expectedVariationType: UFC_VariationType.boolean
-            )?.variation?.value.getBoolValue() ?? defaultValue
-        } catch {
-            return defaultValue
-        }
+        defaultValue: Bool
+    ) throws -> Bool {
+        return try getInternalAssignment(
+            flagKey: flagKey,
+            subjectKey: subjectKey,
+            subjectAttributes: subjectAttributes,
+            expectedVariationType: UFC_VariationType.boolean
+        )?.variation?.value.getBoolValue() ?? defaultValue
     }
 
     public func getJSONStringAssignment(
         flagKey: String,
         subjectKey: String,
         subjectAttributes: SubjectAttributes,
-        defaultValue: String) -> String {
-        do {
-            return try getInternalAssignment(
-                flagKey: flagKey,
-                subjectKey: subjectKey,
-                subjectAttributes: subjectAttributes,
-                expectedVariationType: UFC_VariationType.json
-            )?.variation?.value.getStringValue() ?? defaultValue
-        } catch {
-            return defaultValue
-        }
+        defaultValue: String
+    ) throws -> String {
+        return try getInternalAssignment(
+            flagKey: flagKey,
+            subjectKey: subjectKey,
+            subjectAttributes: subjectAttributes,
+            expectedVariationType: UFC_VariationType.json
+        )?.variation?.value.getStringValue() ?? defaultValue
     }
 
     public func getIntegerAssignment(
         flagKey: String,
         subjectKey: String,
         subjectAttributes: SubjectAttributes = SubjectAttributes(),
-        defaultValue: Int) -> Int {
-        do {
-            let assignment = try getInternalAssignment(
-                flagKey: flagKey,
-                subjectKey: subjectKey,
-                subjectAttributes: subjectAttributes,
-                expectedVariationType: UFC_VariationType.integer
-            )
-            
-            // If we got an assignment error, return the default value
-            if assignment?.flagEvaluationCode == .assignmentError {
-                return defaultValue
-            }
-            
-            // Get the double value and check if it's an integer
-            guard let doubleValue = try? assignment?.variation?.value.getDoubleValue(),
-                  doubleValue.isInteger else {
-                return defaultValue
-            }
-            
-            return Int(doubleValue)
-        } catch {
+        defaultValue: Int
+    ) throws -> Int {
+        let assignment = try getInternalAssignment(
+            flagKey: flagKey,
+            subjectKey: subjectKey,
+            subjectAttributes: subjectAttributes,
+            expectedVariationType: UFC_VariationType.integer
+        )
+
+        // If we got an assignment error, return the default value
+        if assignment?.flagEvaluationCode == .assignmentError {
             return defaultValue
         }
+
+        // Get the double value and check if it's an integer
+        guard let doubleValue = try? assignment?.variation?.value.getDoubleValue(),
+              doubleValue.isInteger else {
+            return defaultValue
+        }
+
+        return Int(doubleValue)
     }
 
     public func getNumericAssignment(
         flagKey: String,
         subjectKey: String,
         subjectAttributes: SubjectAttributes = SubjectAttributes(),
-        defaultValue: Double) -> Double {
-        do {
-            return try getInternalAssignment(
-                flagKey: flagKey,
-                subjectKey: subjectKey,
-                subjectAttributes: subjectAttributes,
-                expectedVariationType: UFC_VariationType.numeric
-            )?.variation?.value.getDoubleValue() ?? defaultValue
-        } catch {
-            return defaultValue
-        }
+        defaultValue: Double
+    ) throws -> Double {
+        return try getInternalAssignment(
+            flagKey: flagKey,
+            subjectKey: subjectKey,
+            subjectAttributes: subjectAttributes,
+            expectedVariationType: UFC_VariationType.numeric
+        )?.variation?.value.getDoubleValue() ?? defaultValue
     }
 
     public func getStringAssignment(
         flagKey: String,
         subjectKey: String,
         subjectAttributes: SubjectAttributes = SubjectAttributes(),
-        defaultValue: String) -> String {
-        do {
-            return try getInternalAssignment(
-                flagKey: flagKey,
-                subjectKey: subjectKey,
-                subjectAttributes: subjectAttributes,
-                expectedVariationType: UFC_VariationType.string
-            )?.variation?.value.getStringValue() ?? defaultValue
-        } catch {
-            return defaultValue
-        }
+        defaultValue: String
+    ) throws -> String {
+        return try getInternalAssignment(
+            flagKey: flagKey,
+            subjectKey: subjectKey,
+            subjectAttributes: subjectAttributes,
+            expectedVariationType: UFC_VariationType.string
+        )?.variation?.value.getStringValue() ?? defaultValue
     }
 
     /// Returns the current configuration stored in the client.
@@ -345,7 +387,7 @@ public class EppoClient {
         subjectKey: String,
         expectedVariationType: UFC_VariationType
     ) -> (flagEvaluationCode: FlagEvaluationCode, flagEvaluationDescription: String) {
-        guard isValueOfType(expectedType: expectedVariationType, variationValue: variation.value) else {
+        guard variation.value.isOfType(expectedVariationType) else {
             return (
                 flagEvaluationCode: .assignmentError,
                 flagEvaluationDescription: "Variation (\(variation.key)) is configured for type \(expectedVariationType), but is set to incompatible value (\(variation.value))"
@@ -373,17 +415,27 @@ public class EppoClient {
         flagKey: String,
         subjectKey: String,
         subjectAttributes: SubjectAttributes,
-        expectedVariationType: UFC_VariationType) throws -> FlagEvaluation? {
-        if self.sdkKey.token.count == 0 {
+        expectedVariationType: UFC_VariationType? = nil
+    ) throws -> FlagEvaluation? {
+        guard hasLoaded else {
+            throw Errors.configurationNotLoaded
+        }
+
+        guard !sdkKey.token.isEmpty else {
             throw Errors.sdkKeyInvalid
         }
 
-        if self.host.count == 0 {
+        guard !host.isEmpty else {
             throw Errors.hostInvalid
         }
 
-        if subjectKey.count == 0 { throw Errors.subjectKeyRequired }
-        if flagKey.count == 0 { throw Errors.flagKeyRequired }
+        guard !subjectKey.isEmpty else {
+            throw Errors.subjectKeyRequired
+        }
+
+        guard !flagKey.isEmpty else {
+            throw Errors.flagKeyRequired
+        }
 
         guard let configuration = self.configurationStore.getConfiguration() else {
             throw Errors.configurationNotLoaded
@@ -402,26 +454,8 @@ public class EppoClient {
             )
         }
 
-        if flagConfig.variationType != expectedVariationType {
-            // Get all allocations from the flag config
-            let allAllocations = flagConfig.allocations.enumerated().map { index, allocation in
-                AllocationEvaluation(
-                    key: allocation.key,
-                    allocationEvaluationCode: .unevaluated,
-                    orderPosition: index + 1
-                )
-            }
-            
-            return FlagEvaluation.noneResult(
-                flagKey: flagKey,
-                subjectKey: subjectKey,
-                subjectAttributes: subjectAttributes,
-                flagEvaluationCode: .typeMismatch,
-                flagEvaluationDescription: "Variation value does not have the correct type. Found \(flagConfig.variationType.rawValue.uppercased()), but expected \(expectedVariationType.rawValue.uppercased()) for flag \(flagKey)",
-                unmatchedAllocations: [],
-                unevaluatedAllocations: allAllocations,
-                entityId: flagConfig.entityId
-            )
+        guard flagConfig.variationType == expectedVariationType else {
+            throw Errors.variationTypeMismatch
         }
 
         let flagEvaluation = flagEvaluator.evaluateFlag(
@@ -431,9 +465,13 @@ public class EppoClient {
             isConfigObfuscated: configuration.obfuscated
         )
 
+        if let variation = flagEvaluation.variation, let expectedVariationType, !variation.value.isOfType(expectedVariationType) {
+            throw Errors.variationWrongType
+        }
+
         // Optionally log assignment
-        if flagEvaluation.doLog && flagEvaluation.flagEvaluationCode != .assignmentError {
-            if let assignmentLogger = self.assignmentLogger {
+        if flagEvaluation.doLog {
+            if let assignmentLogger {
                 let allocationKey = flagEvaluation.allocationKey ?? "__eppo_no_allocation"
                 let variationKey = flagEvaluation.variation?.key ?? "__eppo_no_variation"
 
@@ -941,17 +979,19 @@ public class EppoClient {
     
 }
 
-func isValueOfType(expectedType: UFC_VariationType, variationValue: EppoValue) -> Bool {
-    switch expectedType {
-    case .json, .string:
-        return variationValue.isString()
-    case .integer:
-        let doubleValue = try? variationValue.getDoubleValue()
-        return variationValue.isNumeric() && doubleValue != nil && floor(doubleValue!) == doubleValue!
-    case .numeric:
-        return variationValue.isNumeric()
-    case .boolean:
-        return variationValue.isBool()
+private extension EppoValue {
+    func isOfType(_ expectedType: UFC_VariationType) -> Bool {
+        switch expectedType {
+        case .json, .string:
+            return self.isString()
+        case .integer:
+            let doubleValue = try? self.getDoubleValue()
+            return self.isNumeric() && doubleValue != nil && floor(doubleValue!) == doubleValue!
+        case .numeric:
+            return self.isNumeric()
+        case .boolean:
+            return self.isBool()
+        }
     }
 }
 
