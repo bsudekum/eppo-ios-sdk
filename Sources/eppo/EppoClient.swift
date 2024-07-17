@@ -454,7 +454,7 @@ public class EppoClient {
             )
         }
 
-        guard flagConfig.variationType == expectedVariationType else {
+        if let expectedVariationType, flagConfig.variationType != expectedVariationType {
             throw Errors.variationTypeMismatch
         }
 
