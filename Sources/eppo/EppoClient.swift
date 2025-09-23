@@ -68,7 +68,7 @@ public class EppoClient {
 
     public init(
         sdkKey: String,
-        host: String = "https://fscdn.eppo.cloud",
+        host: String = "https://fscdn.eppo.cloud/api",
         assignmentLogger: AssignmentLogger? = nil,
         assignmentCache: AssignmentCache? = InMemoryAssignmentCache(),
         initialConfiguration: Configuration?,
@@ -110,7 +110,7 @@ public class EppoClient {
     /// Configuration can later be loaded with `load()` method.
     public static func initializeOffline(
         sdkKey: String,
-        host: String,
+        host: String = "https://fscdn.eppo.cloud/api",
         assignmentLogger: AssignmentLogger? = nil,
         assignmentCache: AssignmentCache? = InMemoryAssignmentCache(),
         initialConfiguration: Configuration?,
@@ -144,7 +144,7 @@ public class EppoClient {
 
     public static func initialize(
         sdkKey: String,
-        host: String,
+        host: String = "https://fscdn.eppo.cloud/api",
         assignmentLogger: AssignmentLogger? = nil,
         assignmentCache: AssignmentCache? = InMemoryAssignmentCache(),
         initialConfiguration: Configuration? = nil,
