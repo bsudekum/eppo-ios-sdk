@@ -53,7 +53,7 @@ public class EppoClient {
     private let queue = DispatchQueue(label: "com.eppo.client.EppoClient", attributes: .concurrent)
 
     private var _hasLoaded = false
-    private var hasLoaded: Bool {
+    private var hasForceLoaded: Bool {
         get {
             queue.sync {
                 self._hasLoaded
@@ -258,12 +258,12 @@ public class EppoClient {
     // Note: this *must* be called before getting any assignments, otherwise an error will
     // be thrown
     public func load(force: Bool = false) async throws {
-        guard !hasLoaded || force else {
+        guard !hasForceLoaded || force else {
             return
         }
 
         // Prevent multiple subsequent calls, optimistically assuming the fetch will succeed
-        hasLoaded = true
+        hasForceLoaded = true
 
         do {
             debugLog("Starting configuration fetch from remote")
@@ -279,7 +279,7 @@ public class EppoClient {
 
             debugLog("Configuration storage and load completed")
         } catch {
-            hasLoaded = false
+            hasForceLoaded = false
             throw error
         }
     }
@@ -421,10 +421,6 @@ public class EppoClient {
         subjectAttributes: SubjectAttributes,
         expectedVariationType: UFC_VariationType? = nil
     ) throws -> FlagEvaluation? {
-        guard hasLoaded else {
-            throw Errors.configurationNotLoaded
-        }
-
         guard !sdkKey.token.isEmpty else {
             throw Errors.sdkKeyInvalid
         }
