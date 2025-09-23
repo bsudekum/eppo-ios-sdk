@@ -88,12 +88,16 @@ public class EppoClient {
         let httpClient = NetworkEppoHttpClient(baseURL: self.host, sdkKey: self.sdkKey.token, sdkName: sdkName, sdkVersion: sdkVersion)
         self.configurationRequester = ConfigurationRequester(httpClient: httpClient)
 
-        self.configurationStore = ConfigurationStore(withPersistentCache: withPersistentCache)
+        let configurationStore = ConfigurationStore(withPersistentCache: withPersistentCache)
+        self.configurationStore = configurationStore
+
         if let configuration = initialConfiguration {
             self.configurationStore.setConfiguration(configuration: configuration)
             // Note: Callbacks will be registered after init, so initial config callback will be triggered during loadIfNeeded
+        } else {
+            configurationStore.loadInitialConfiguration()
         }
-        
+
         // Set up debug logging for ConfigurationRequester and ConfigurationStore after all properties are initialized
         if debugCallback != nil {
             self.configurationRequester.setDebugLogger { [weak self] message in
