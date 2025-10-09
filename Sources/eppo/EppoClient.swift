@@ -30,8 +30,6 @@ actor EppoClientState {
 public class EppoClient {
     public typealias AssignmentLogger = (Assignment) -> Void
 
-    private static let sharedLock = NSLock()
-    private static var sharedInstance: EppoClient?
     private static let initializerQueue = DispatchQueue(label: "cloud.eppo.client.initializer")
 
     private var flagEvaluator: FlagEvaluator = FlagEvaluator(sharder: MD5Sharder())
@@ -50,14 +48,31 @@ public class EppoClient {
     private var debugInitStartTime: Date?
     private var debugLastStepTime: Date?
 
-    private init(
+    private let queue = DispatchQueue(label: "com.eppo.client.EppoClient", attributes: .concurrent)
+
+    private var _hasLoaded = false
+    private var hasLoaded: Bool {
+      get {
+        queue.sync {
+          self._hasLoaded
+        }
+      }
+      set {
+        queue.async(flags: .barrier) {
+          self._hasLoaded = newValue
+        }
+      }
+    }
+
+    public init(
         sdkKey: String,
-        host: String? = nil,
+        host: String = "https://fscdn.eppo.cloud/api",
         assignmentLogger: AssignmentLogger? = nil,
         assignmentCache: AssignmentCache? = InMemoryAssignmentCache(),
         initialConfiguration: Configuration?,
         withPersistentCache: Bool = true,
-        debugCallback: ((String, Double, Double) -> Void)? = nil
+        debugCallback: ((String, Double, Double) -> Void)? = nil,
+        configurationChangeCallback: ConfigurationChangeCallback? = nil,
     ) {
         self.sdkKey = SDKKey(sdkKey)
         self.assignmentLogger = assignmentLogger
@@ -72,13 +87,15 @@ public class EppoClient {
         let httpClient = NetworkEppoHttpClient(baseURL: self.host, sdkKey: self.sdkKey.token, sdkName: sdkName, sdkVersion: sdkVersion)
         self.configurationRequester = ConfigurationRequester(httpClient: httpClient)
 
-        self.configurationStore = ConfigurationStore(withPersistentCache: withPersistentCache)
+        let configurationStore = ConfigurationStore(withPersistentCache: withPersistentCache)
+        self.configurationStore = configurationStore
         if let configuration = initialConfiguration {
             self.configurationStore.setConfiguration(configuration: configuration)
-            // Note: Callbacks will be registered after init, so initial config callback will be triggered during loadIfNeeded
+        } else {
+            self.configurationStore.loadInitialConfiguration()
         }
-        
-        // Set up debug logging for ConfigurationRequester and ConfigurationStore after all properties are initialized
+        self.configurationChangeCallback = configurationChangeCallback
+
         if debugCallback != nil {
             self.configurationRequester.setDebugLogger { [weak self] message in
                 self?.debugLog(message)
@@ -89,150 +106,31 @@ public class EppoClient {
         }
     }
 
-    /// Initialize client without loading remote configuration.
-    ///
-    /// Configuration can later be loaded with `load()` method.
-    public static func initializeOffline(
-        sdkKey: String,
-        host: String? = nil,
-        assignmentLogger: AssignmentLogger? = nil,
-        assignmentCache: AssignmentCache? = InMemoryAssignmentCache(),
-        initialConfiguration: Configuration?,
-        withPersistentCache: Bool = true,
-        configurationChangeCallback: ConfigurationChangeCallback? = nil,
-        debugCallback: ((String, Double, Double) -> Void)? = nil
-    ) -> EppoClient {
-        return sharedLock.withLock {
-            if let instance = sharedInstance {
-                return instance
-            } else {
-                let instance = EppoClient(
-                  sdkKey: sdkKey,
-                  host: host,
-                  assignmentLogger: assignmentLogger,
-                  assignmentCache: assignmentCache,
-                  initialConfiguration: initialConfiguration,
-                  withPersistentCache: withPersistentCache,
-                  debugCallback: debugCallback
-                )
-                
-                if let callback = configurationChangeCallback {
-                    instance.onConfigurationChange(callback)
-                }
-                
-                sharedInstance = instance
-                return instance
-            }
-        }
-    }
-
-    public static func initialize(
-        sdkKey: String,
-        host: String? = nil,
-        assignmentLogger: AssignmentLogger? = nil,
-        assignmentCache: AssignmentCache? = InMemoryAssignmentCache(),
-        initialConfiguration: Configuration? = nil,
-        pollingEnabled: Bool = false,
-        pollingIntervalMs: Int = PollerConstants.DEFAULT_POLL_INTERVAL_MS,
-        pollingJitterMs: Int = PollerConstants.DEFAULT_POLL_INTERVAL_MS / PollerConstants.DEFAULT_JITTER_INTERVAL_RATIO,
-        configurationChangeCallback: ConfigurationChangeCallback? = nil,
-        debugCallback: ((String, Double, Double) -> Void)? = nil
-    ) async throws -> EppoClient {
-        let instance = Self.initializeOffline(
-            sdkKey: sdkKey,
-            host: host,
-            assignmentLogger: assignmentLogger,
-            assignmentCache: assignmentCache,
-            initialConfiguration: initialConfiguration,
-            configurationChangeCallback: configurationChangeCallback,
-            debugCallback: debugCallback
-        )
-
-        return try await withCheckedThrowingContinuation { continuation in
-            initializerQueue.async {
-                Task {
-                    do {
-                        instance.resetDebugTiming()
-                        instance.debugLog("Starting Eppo SDK initialization")
-                        
-                        // Ensure persistent storage is loaded with debug timing
-                        instance.configurationStore.loadInitialConfiguration()
-                        
-                        try await instance.loadIfNeeded()
-                        
-                        instance.debugLog("Configuration loading completed")
-                        
-                        if pollingEnabled {
-                            instance.debugLog("Starting polling setup")
-                            
-                            try await instance.startPolling(
-                                intervalMs: pollingIntervalMs,
-                                jitterMs: pollingJitterMs
-                            )
-                            
-                            instance.debugLog("Polling setup completed")
-                        }
-                        
-                        instance.debugLog("Total SDK initialization completed")
-                        
-                        continuation.resume(returning: instance)
-                    } catch {
-                        instance.debugLog("SDK initialization failed with error: \(error.localizedDescription)")
-                        continuation.resume(throwing: error)
-                    }
-                }
-            }
-        }
-    }
-
-    public static func shared() throws -> EppoClient {
-        try self.sharedLock.withLock {
-            guard let instance = sharedInstance else {
-                throw Errors.notConfigured
-            }
-            return instance
-        }
-    }
-
-    // Loads the configuration from the remote source on-demand. Can be used to refresh as desired.
-    //
-    // This function can be called from multiple threads; synchronization is provided to safely update
-    // the configuration cache but each invocation will execute a new network request with billing impact.
-    public func load() async throws {
-        debugLog("Starting configuration fetch from remote")
-        
-        let config = try await self.configurationRequester.fetchConfigurations()
-        
-        debugLog("Network fetch and parsing completed")
-        
-        debugLog("Starting configuration storage")
-        
-        self.configurationStore.setConfiguration(configuration: config)
-        notifyConfigurationChange(config)
-        
-        debugLog("Configuration storage and load completed")
-    }
-
-    public static func resetSharedInstance() {
-        self.sharedLock.withLock {
-            sharedInstance = nil
-        }
-    }
-
-    private func loadIfNeeded() async throws {
-        debugLog("Checking if SDK already loaded")
-        let alreadyLoaded = await state.checkAndSetLoaded()
-        guard !alreadyLoaded else { 
-            debugLog("SDK already loaded, using existing configuration")
-            // If already loaded but we have an existing configuration, notify callbacks
-            if let existingConfig = configurationStore.getConfiguration() {
-                notifyConfigurationChange(existingConfig)
-            }
-            return 
+    public func load(force: Bool = false) async throws {
+        guard !hasLoaded || force else {
+            return
         }
 
-        debugLog("First-time initialization detected, loading configuration")
-        try await self.load()
+        // Prevent multiple subsequent calls, optimistically assuming the fetch will succeed
+        hasLoaded = true
+
+        do {
+            debugLog("Starting configuration fetch from remote")
+
+            let config = try await self.configurationRequester.fetchConfigurations()
+
+            debugLog("Network fetch and parsing completed")
+
+            debugLog("Starting configuration storage")
+
+            self.configurationStore.setConfiguration(configuration: config)
+            notifyConfigurationChange(config)
+
+            debugLog("Configuration storage and load completed")
+        } catch {
+            hasLoaded = false
+            throw error
+        }
     }
 
     public func getBooleanAssignment(
@@ -888,7 +786,7 @@ public class EppoClient {
             jitterMs: jitterMs,
             callback: { [weak self] in
                 guard let self = self else { return }
-                try await self.load()
+                try await self.load(force: true)
             }
         )
         
