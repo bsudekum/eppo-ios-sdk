@@ -73,6 +73,31 @@ public class EppoClient {
         
     }
 
+    /// Creates a client of its own instead of the shared instance, so an app can keep separate
+    /// clients, such as one that evaluates without logging assignments.
+    ///
+    /// Without an initial configuration, the client starts from the persisted one, which this
+    /// reads from disk. Configuration can later be loaded with `load()` method.
+    public convenience init(
+        sdkKey: String,
+        assignmentLogger: AssignmentLogger? = nil,
+        assignmentCache: AssignmentCache? = InMemoryAssignmentCache(),
+        initialConfiguration: Configuration?,
+        withPersistentCache: Bool = true
+    ) {
+        self.init(
+            sdkKey: sdkKey,
+            host: nil,
+            assignmentLogger: assignmentLogger,
+            assignmentCache: assignmentCache,
+            initialConfiguration: initialConfiguration,
+            withPersistentCache: withPersistentCache
+        )
+        if initialConfiguration == nil {
+            configurationStore.loadInitialConfiguration()
+        }
+    }
+
     /// Initialize client without loading remote configuration.
     ///
     /// Configuration can later be loaded with `load()` method.
